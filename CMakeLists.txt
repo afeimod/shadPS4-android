@@ -993,6 +993,14 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/cpu/interpreter/x64_hle_bridge.cpp
          src/core/cpu/native/native_x64_backend.h
          src/core/cpu/native/native_x64_backend.cpp
+         # ARM64 JIT backend (x86-64 → ARM64 translation at runtime).
+         # Only compiled on ARM64; on x86 hosts the files are still
+         # listed but the code is #ifdef-guarded to compile as stubs.
+         src/core/cpu/jit/arm64_emitter.h
+         src/core/cpu/jit/jit_block_cache.h
+         src/core/cpu/jit/jit_block_cache.cpp
+         src/core/cpu/jit/aarch64_jit_backend.h
+         src/core/cpu/jit/aarch64_jit_backend.cpp
 )
 
 if (ARCHITECTURE STREQUAL "x86_64")
