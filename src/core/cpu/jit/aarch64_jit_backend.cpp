@@ -359,64 +359,23 @@ Aarch64JitBackend::Aarch64JitBackend()
 Aarch64JitBackend::~Aarch64JitBackend() = default;
 
 u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
-    X64CpuState state;
-
-    // Set up the guest state.
-    state.rip = rip;
-    state.in_guest_code = true;
-
-    // Main JIT execution loop.
-    while (state.in_guest_code) {
-        // Look up the block in the cache.
-        const BlockEntry* entry = m_impl->block_cache.Lookup(state.rip);
-
-        void* block_code = nullptr;
-        if (entry) {
-            // Cache hit — jump to the existing translated block.
-            block_code = entry->host_code;
-        } else {
-            // Cache miss — translate the block.
-            block_code = m_impl->TranslateBlock(state.rip, state);
-            if (!block_code) {
-                // Translation failed — fall back to the interpreter.
-                LOG_WARNING(Core_Cpu, "JIT: Block translation failed at rip=0x{:x}, "
-                            "falling back to interpreter", state.rip);
-                X64InterpreterBackend interp;
-                state.rip = interp.Execute(state.rip, ctx);
-                break;
-            }
-        }
-
-        // Load GPRs from X64CpuState into ARM64 registers (in C++ for the MVP).
-        // The translated block expects X0..X15 to contain the guest GPRs.
-        //
-        // On ARM64, we can use inline assembly to load registers and jump,
-        // but for the MVP we use a function-pointer call with register
-        // passing. The ARM64 calling convention puts X0..X7 in the first
-        // 8 registers, so we can pass the first 8 GPRs directly.
-        //
-        // For a full implementation, we'd emit a trampoline that loads
-        // all 16 GPRs from X64CpuState and jumps to the block. Here we
-        // use a simpler approach: call the block as a function that
-        // takes the state pointer and returns the new RIP.
-        //
-        // NOTE: The actual block execution would be:
-        //   typedef u64 (*BlockFunc)(X64CpuState* state);
-        //   BlockFunc func = (BlockFunc)block_code;
-        //   state.rip = func(&state);
-        //
-        // But our translated blocks currently just emit RET without
-        // touching the state, so calling them would be a no-op.
-        // For the MVP, we fall back to the interpreter for all blocks
-        // until the block emission is more complete.
-        //
-        // FALLBACK: use the interpreter for now.
-        X64InterpreterBackend interp;
-        state.rip = interp.Execute(state.rip, ctx);
-        break;
-    }
-
-    return state.rip;
+    // For now, the JIT translates blocks into ARM64 code but cannot yet
+    // execute them (the entry/exit trampoline that loads/stores GPRs
+    // from X64CpuState hasn't been written). We must fall back to the
+    // interpreter for ALL execution.
+    //
+    // The TranslateBlock() call above would decode guest code and emit
+    // ARM64 instructions, but calling TranslateBlock() can itself crash
+    // if it tries to read unmapped guest memory (e.g., the crash at
+    // address 0x10010000 in the SIGSEGV). So we skip translation entirely
+    // and just call the interpreter directly.
+    //
+    // Once the trampoline is implemented (loading X0-X15 from gpr[],
+    // jumping to translated ARM64 code, storing back on return), this
+    // function will use the block cache and execute translated blocks
+    // at near-native speed.
+    static X64InterpreterBackend s_interpreter;
+    return s_interpreter.Execute(rip, ctx);
 }
 
 void Aarch64JitBackend::SetRuntimeConfig(const std::string& key, const std::string& value) {
