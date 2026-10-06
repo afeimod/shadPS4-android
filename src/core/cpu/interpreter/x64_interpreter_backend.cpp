@@ -1021,13 +1021,20 @@ u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& /*ctx*/) {
 
     u64 instruction_count = 0;
     while (state.in_guest_code) {
-        // Sanity check: if RIP is suspiciously low, it's likely a
-        // bad jump/return from an instruction we haven't verified.
-        // Log and break instead of crashing.
-        if (state.rip < 0x1000) {
-            LOG_ERROR(Core_Cpu, "Interpreter: RIP=0x{:x} is too low (likely bad jump/ret). Exiting.",
+        // Sanity check: if RIP is outside the valid guest memory range,
+        // it's a bad jump/return from an instruction we haven't verified.
+        // Guest memory is at 0x200000000 - 0x900000000. Any RIP outside
+        // this range would cause a SIGSEGV when we try to read guest
+        // code, which would kill the process on Android (the signal
+        // handler calls raise(SIGSEGV) to terminate). Instead, log
+        // and exit the interpreter loop gracefully.
+        if (state.rip < 0x100000000ULL || state.rip >= 0x900000000ULL) {
+            LOG_ERROR(Core_Cpu, "Interpreter: RIP=0x{:x} is outside guest memory range "
+                      "(0x200000000-0x900000000). Likely bad jump/ret from "
+                      "unimplemented instruction. Exiting gracefully.",
                       state.rip);
             DumpRecentInterpreterTrace("bad-rip", 32);
+            state.in_guest_code = false;
             break;
         }
 
@@ -1047,13 +1054,17 @@ u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& /*ctx*/) {
         // may trigger a signal if the guest page isn't fully mapped).
         const u8* code = reinterpret_cast<const u8*>(state.rip);
         u8 code_buf[15];
+        // Copy guest bytes into local buffer FIRST, before any logging
+        // that might dereference the pointer. If the page is unmapped,
+        // the memcpy will trigger SIGSEGV — but we've already checked
+        // the RIP range above, so this should be safe.
+        std::memcpy(code_buf, code, 15);
         // Log first few instructions for debugging.
         if (instruction_count < 10) {
             LOG_INFO(Core_Cpu, "[{:3}] rip=0x{:016x} rsp=0x{:016x} bytes={:02x} {:02x} {:02x} {:02x}",
                       instruction_count, state.rip, state.gpr[GPR_RSP],
-                      code[0], code[1], code[2], code[3]);
+                      code_buf[0], code_buf[1], code_buf[2], code_buf[3]);
         }
-        std::memcpy(code_buf, code, 15);
         const ZyanStatus status = ZydisDecoderDecodeFull(
             &m_impl->decoder, code_buf, 15, &inst, operands);
         if (!ZYAN_SUCCESS(status)) {

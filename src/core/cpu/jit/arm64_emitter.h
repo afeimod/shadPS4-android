@@ -290,6 +290,142 @@ public:
         Emit32(0xD63F0000 | (u32(reg) << 5));
     }
 
+    // ── ADR Xd, #offset (PC-relative address) ──
+    // Computes the address of the current instruction + offset and stores it
+    // in Xd. Used by the trampoline to set X30 (LR) to the exit-handler address
+    // without needing a literal pool.
+    // Encoding: bit 31 = 0 (ADR, not ADRP), bits 30-29 = immlo (low 2 bits),
+    //           bits 28-24 = 10000, bits 23-5 = immhi (high 19 bits), bits 4-0 = Rd.
+    void Adr(Arm64Reg dst, s32 offset) {
+        u32 immlo = (u32)(offset & 0x3);
+        u32 immhi = (u32)((offset >> 2) & 0x7FFFF);
+        Emit32(0x10000000 | (immlo << 29) | (immhi << 5) | u32(dst));
+    }
+
+    // ── ANDS Xd, Xn, Xm (AND setting flags) ──
+    // Same as AND but updates NZCV (N and Z set from result, C=0, V=0).
+    // Used for TEST (when dest=ZR) and for flag-setting AND.
+    // Encoding: 0xEA000000 | (Xm << 16) | (Xn << 5) | Xd
+    void Ands(Arm64Reg dst, Arm64Reg lhs, Arm64Reg rhs) {
+        Emit32(0xEA000000 | (u32(rhs) << 16) | (u32(lhs) << 5) | u32(dst));
+    }
+
+    // ── CBNZ Xn, #offset (compare and branch if non-zero, 64-bit) ──
+    // Branches to PC + offset if Xn != 0. Used for Jcc condition testing.
+    // Encoding: 0xB5000000 | (imm19 << 5) | Xn
+    void Cbnz(Arm64Reg reg, s32 offset) {
+        u32 imm19 = (u32)((offset / 4) & 0x7FFFF);
+        Emit32(0xB5000000 | (imm19 << 5) | u32(reg));
+    }
+
+    // ── CBZ Xn, #offset (compare and branch if zero, 64-bit) ──
+    // Branches to PC + offset if Xn == 0. Used for inverted Jcc conditions.
+    // Encoding: 0xB4000000 | (imm19 << 5) | Xn
+    void Cbz(Arm64Reg reg, s32 offset) {
+        u32 imm19 = (u32)((offset / 4) & 0x7FFFF);
+        Emit32(0xB4000000 | (imm19 << 5) | u32(reg));
+    }
+
+    // ── TST Xn, #imm12 (test bits, simplified immediate) ──
+    // Alias for ANDS XZR, Xn, #imm. The imm12 is placed in the imms field with
+    // N=0 and immr=0; this produces a valid ARM64 instruction (the actual
+    // encoded immediate value is determined by the N:immr:imms bitfield
+    // pattern, so callers should use values that match a real logical-immediate
+    // pattern when correctness is required).
+    // Encoding: 0xF2000000 | (imm12 << 10) | (Xn << 5) | ZR
+    void TstImm(Arm64Reg reg, u32 imm12) {
+        Emit32(0xF2000000 | ((imm12 & 0xFFF) << 10) | (u32(reg) << 5) | u32(ZR));
+    }
+
+    // ── MRS Xd, NZCV (read NZCV flags into a register) ──
+    // Reads the ARM64 NZCV condition flags into bits 31-28 of Xd.
+    // Used after flag-setting instructions to convert ARM64 NZCV to x86 RFLAGS.
+    // Encoding: 0xD53B4200 | Rd
+    void MrsNzcv(Arm64Reg dst) {
+        Emit32(0xD53B4200 | u32(dst));
+    }
+
+    // ── LSL Xd, Xn, #shift (logical shift left immediate) ──
+    // Alias for UBFM Xd, Xn, #(-shift mod 64), #(63 - shift).
+    // Encoding (UBFM 64-bit): 0xD3400000 | (immr << 16) | (imms << 10) | (Xn << 5) | Xd
+    void LslImm(Arm64Reg dst, Arm64Reg src, u32 shift) {
+        u32 immr = (64 - shift) & 0x3F;
+        u32 imms = 63 - shift;
+        Emit32(0xD3400000 | (immr << 16) | (imms << 10) | (u32(src) << 5) | u32(dst));
+    }
+
+    // ── LSR Xd, Xn, #shift (logical shift right immediate) ──
+    // Alias for UBFM Xd, Xn, #shift, #63.
+    // Encoding (UBFM 64-bit): 0xD3400000 | (shift << 16) | (63 << 10) | (Xn << 5) | Xd
+    void LsrImm(Arm64Reg dst, Arm64Reg src, u32 shift) {
+        Emit32(0xD3400000 | ((shift & 0x3F) << 16) | (63 << 10) |
+               (u32(src) << 5) | u32(dst));
+    }
+
+    // ── NEG Xd, Xn (negate) ──
+    // Alias for SUB Xd, XZR, Xn.
+    // Encoding: 0xCB000000 | (Xn << 16) | (ZR << 5) | Xd
+    void Neg(Arm64Reg dst, Arm64Reg src) {
+        Emit32(0xCB000000 | (u32(src) << 16) | (u32(ZR) << 5) | u32(dst));
+    }
+
+    // ── UBFX Xd, Xn, #lsb, #width (unsigned bitfield extract) ──
+    // Extracts `width` bits from Xn starting at bit `lsb` and zero-extends
+    // them into Xd. Alias for UBFM Xd, Xn, #lsb, #(lsb + width - 1).
+    // Used to extract individual flag bits from NZCV during flag conversion.
+    // Encoding (UBFM 64-bit): 0xD3400000 | (lsb << 16) | (imms << 10) | (Xn << 5) | Xd
+    void Ubfx(Arm64Reg dst, Arm64Reg src, u32 lsb, u32 width) {
+        u32 imms = lsb + width - 1;
+        Emit32(0xD3400000 | ((lsb & 0x3F) << 16) | ((imms & 0x3F) << 10) |
+               (u32(src) << 5) | u32(dst));
+    }
+
+    // ── LDR Xt, [Xn, Xm] (register offset, no shift) ──
+    // 64-bit load: Xt = *(Xn + Xm). Used for memory operands with both base
+    // and index registers.
+    // Encoding: 0xF8406800 | (Xm << 16) | (Xn << 5) | Xt
+    // (size=11, opc=01 for LDR, option=011 LSL, S=0, load=10)
+    void Ldr64Reg(Arm64Reg dst, Arm64Reg base, Arm64Reg index) {
+        Emit32(0xF8406800 | (u32(index) << 16) | (u32(base) << 5) | u32(dst));
+    }
+
+    // ── STR Xt, [Xn, Xm] (register offset, no shift) ──
+    // 64-bit store: *(Xn + Xm) = Xt.
+    // Encoding: 0xF8006000 | (Xm << 16) | (Xn << 5) | Xt
+    // (size=11, opc=00 for STR, option=011 LSL, S=0, store=00)
+    void Str64Reg(Arm64Reg src, Arm64Reg base, Arm64Reg index) {
+        Emit32(0xF8006000 | (u32(index) << 16) | (u32(base) << 5) | u32(src));
+    }
+
+    // ── MADD Xd, Xn, Xm, Xa (multiply-add) ──
+    // Computes Xd = Xa + Xn * Xm. Used for [base + index*scale] address
+    // computation: MADD Xaddr, Xindex, Xscale, Xbase gives
+    // Xaddr = Xbase + Xindex * Xscale.
+    // Encoding: 0x9B000000 | (Xm << 16) | (Xa << 10) | (Xn << 5) | Xd
+    void Madd(Arm64Reg dst, Arm64Reg src1, Arm64Reg src2, Arm64Reg src3) {
+        Emit32(0x9B000000 | (u32(src2) << 16) | (u32(src3) << 10) |
+               (u32(src1) << 5) | u32(dst));
+    }
+
+    // ── ADD Xd, Xn, Xm (register, explicit name) ──
+    // Same as Add() but with a more explicit name for code that wants to make
+    // the "register-register add" form obvious at the call site.
+    // Encoding: 0x8B000000 | (Xm << 16) | (Xn << 5) | Xd
+    void AddReg(Arm64Reg dst, Arm64Reg lhs, Arm64Reg rhs) {
+        Emit32(0x8B000000 | (u32(rhs) << 16) | (u32(lhs) << 5) | u32(dst));
+    }
+
+    // ── ORR Xd, Xn, #imm12 (immediate, simplified) ──
+    // The imm12 is placed in the imms field with N=0 and immr=0. The encoded
+    // immediate value is determined by the N:immr:imms bitfield pattern, so
+    // callers should pass values matching a real logical-immediate pattern
+    // when correctness is required (the JIT uses register-form ORR for flag
+    // conversion to avoid this restriction).
+    // Encoding: 0xB2000000 | (imm12 << 10) | (Xn << 5) | Xd
+    void OrrImm(Arm64Reg dst, Arm64Reg src, u32 imm12) {
+        Emit32(0xB2000000 | ((imm12 & 0xFFF) << 10) | (u32(src) << 5) | u32(dst));
+    }
+
     // Get current code offset (in bytes, from the start of the buffer).
     // Used for computing branch targets before they're emitted.
     s32 current_offset() const {
