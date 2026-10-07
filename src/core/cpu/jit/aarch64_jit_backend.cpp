@@ -1586,12 +1586,15 @@ u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
             stack_inited = true;
             LOG_INFO(Core_Cpu, "JIT: Guest stack at 0x{:x}-0x{:x}", kStackBase, kStackBase + kStackSize);
         }
-        // Set up RSP at the top of the stack, misaligned by 16.
-        m_impl->state.gpr[4] = kStackBase + kStackSize - 16; // RSP = stack top - 16
-        // Write a sentinel return address (0) at [RSP] so the first RET
-        // from the game's entry point exits the interpreter/JIT loop.
+        // Set up RSP exactly as the interpreter does: start at top-16,
+        // then push two sentinel return addresses (each 8 bytes),
+        // ending at top-32. The guest code expects RSP misaligned by 8.
+        m_impl->state.gpr[4] = kStackBase + kStackSize - 16; // RSP = top - 16
+        m_impl->state.gpr[4] -= 8;  // push sentinel 1
         *reinterpret_cast<u64*>(m_impl->state.gpr[4]) = 0;
-        *reinterpret_cast<u64*>(m_impl->state.gpr[4] + 8) = 0;
+        m_impl->state.gpr[4] -= 8;  // push sentinel 2 (misalign)
+        *reinterpret_cast<u64*>(m_impl->state.gpr[4]) = 0;
+        // RSP is now at top - 32, misaligned by 8 from 16-byte boundary.
     }
 
     m_impl->state.rip = rip;
