@@ -78,6 +78,14 @@ public:
     // current guest state.
     static void SetInterpreterThreadStackHint(u64 guest_rip, u64 stack_top);
 
+    // Execute a single x86-64 instruction using the provided state.
+    // Decodes the instruction at state.rip, dispatches it to the
+    // appropriate handler, updates state (GPRs, RIP, flags), and
+    // returns the new RIP. This is used by the JIT backend for
+    // single-instruction fallback — the JIT passes its own
+    // X64CpuState so GPRs stay synchronized.
+    u64 ExecuteOneInstruction(X64CpuState& state);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

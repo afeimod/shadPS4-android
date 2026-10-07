@@ -1562,17 +1562,56 @@ u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
         return s_interpreter.Execute(rip, ctx);
     }
 
+    // Set up the guest stack the same way the interpreter does — the JIT's
+    // translated blocks reference X4 (RSP) for PUSH/POP/CALL/RET, so we
+    // need a valid guest stack at a fixed address. We use the same 1 MB
+    // stack at 0x3A0000000 that the interpreter uses.
+    {
+        constexpr u64 kStackSize = 1 * 1024 * 1024; // 1 MB
+        constexpr u64 kStackBase = 0x3A0000000ULL;
+        static bool stack_inited = false;
+        if (!stack_inited) {
+            void* stack_ptr = mmap(reinterpret_cast<void*>(kStackBase), kStackSize,
+                                   PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            if (stack_ptr == MAP_FAILED) {
+                LOG_CRITICAL(Core_Cpu, "JIT: Failed to allocate guest stack: {}", strerror(errno));
+                static X64InterpreterBackend s_interpreter;
+                return s_interpreter.Execute(rip, ctx);
+            }
+            // Misalign by 16 (x86-64 ABI requires 16-byte alignment before CALL,
+            // but the guest code was written assuming RSP is misaligned by 8
+            // after the initial CALL from the linker). Push a zero return addr.
+            std::memset(stack_ptr, 0, kStackSize);
+            stack_inited = true;
+            LOG_INFO(Core_Cpu, "JIT: Guest stack at 0x{:x}-0x{:x}", kStackBase, kStackBase + kStackSize);
+        }
+        // Set up RSP at the top of the stack, misaligned by 16.
+        m_impl->state.gpr[4] = kStackBase + kStackSize - 16; // RSP = stack top - 16
+        // Write a sentinel return address (0) at [RSP] so the first RET
+        // from the game's entry point exits the interpreter/JIT loop.
+        *reinterpret_cast<u64*>(m_impl->state.gpr[4]) = 0;
+        *reinterpret_cast<u64*>(m_impl->state.gpr[4] + 8) = 0;
+    }
+
+    m_impl->state.rip = rip;
+    m_impl->state.in_guest_code = true;
+
     // Main loop: look up (or translate) the block for `rip`, run it via
     // the trampoline, and handle the fallback path when a block exits at
     // an unimplemented instruction.
     while (true) {
+        // Validate RIP — must be in guest memory range.
+        if (rip < 0x100000000ULL || rip >= 0x900000000ULL) {
+            LOG_ERROR(Core_Cpu, "JIT: RIP=0x{:x} outside guest memory, exiting", rip);
+            return rip;
+        }
+
         const BlockEntry* block = m_impl->block_cache.Lookup(rip);
         if (!block) {
-            // Translate the block. If translation fails entirely (e.g.,
-            // out of code-cache space, or guest_rip is unmapped), fall
-            // back to the interpreter for this whole block.
             void* host_code = m_impl->TranslateBlock(rip);
             if (!host_code) {
+                // Translation failed — run interpreter for this block.
                 static X64InterpreterBackend s_interpreter;
                 return s_interpreter.Execute(rip, ctx);
             }
@@ -1583,33 +1622,27 @@ u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
             }
         }
 
-        // Set up the shared state with the current RIP and run the block.
+        // Run the translated block via the trampoline.
         m_impl->state.rip = rip;
         const u64 new_rip = m_impl->run_block(&m_impl->state, block->host_code);
 
         // Check if the block exited at an unimplemented instruction.
-        // If so, dispatch the interpreter for that single instruction
-        // (the interpreter will run to the next block terminator or to
-        // its own exit condition). After the interpreter returns, re-
-        // enter the JIT at the new RIP.
         auto fb = m_impl->fallback_rips.find(rip);
         if (fb != m_impl->fallback_rips.end() && fb->second == new_rip) {
+            // The JIT block hit an unimplemented instruction and exited
+            // at new_rip (the RIP of the unimplemented instruction).
+            // Use the interpreter's ExecuteOneInstruction to run just
+            // that one instruction, sharing the JIT's X64CpuState so
+            // GPRs stay synchronized.
             static X64InterpreterBackend s_interpreter;
-            // The interpreter creates its own internal state; for the MVP
-            // we don't synchronise GPRs between the JIT and the interpreter
-            // across the fallback boundary. (A full implementation would
-            // either share the X64CpuState or copy GPRs into the
-            // interpreter's state before calling.)
-            const u64 cont = s_interpreter.Execute(new_rip, ctx);
+            m_impl->state.rip = new_rip;
+            const u64 cont = s_interpreter.ExecuteOneInstruction(m_impl->state);
             rip = cont;
             continue;
         }
 
-        // If the new RIP is the same as the previous one and the block
-        // doesn't have a fallback, we'd loop forever — break out so the
-        // runtime can decide what to do. (In practice the runtime will
-        // call Execute() again with a fresh RIP from the host.)
         if (new_rip == rip) {
+            // Same RIP — avoid infinite loop.
             return new_rip;
         }
 

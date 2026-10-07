@@ -1148,4 +1148,64 @@ u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& /*ctx*/) {
     return state.rip;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+//  ExecuteOneInstruction — runs exactly one x86-64 instruction using
+//  the caller-provided X64CpuState. Used by the JIT for single-instruction
+//  fallback when it encounters an instruction it can't translate.
+// ─────────────────────────────────────────────────────────────────────────
+
+u64 X64InterpreterBackend::ExecuteOneInstruction(X64CpuState& state) {
+    // Validate RIP.
+    if (state.rip < 0x100000000ULL || state.rip >= 0x900000000ULL) {
+        LOG_ERROR(Core_Cpu, "ExecuteOneInstruction: RIP=0x{:x} outside guest memory", state.rip);
+        return state.rip;
+    }
+
+    // Read up to 15 bytes of guest code at state.rip.
+    const u8* code = reinterpret_cast<const u8*>(state.rip);
+    u8 code_buf[15];
+    std::memcpy(code_buf, code, 15);
+
+    // Decode the instruction.
+    ZydisDecodedInstruction inst{};
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+
+    const ZyanStatus status = ZydisDecoderDecodeFull(
+        &m_impl->decoder, code_buf, 15, &inst, operands);
+    if (!ZYAN_SUCCESS(status)) {
+        LOG_ERROR(Core_Cpu, "ExecuteOneInstruction: decode failed at rip=0x{:x} (0x{:x})",
+                  state.rip, status);
+        state.rip += 1; // skip one byte
+        return state.rip;
+    }
+
+    // Check for HLE stub.
+    if (IsAerolibStubAddress(state.rip)) {
+        if (DispatchAerolibStub(state.rip, &state)) {
+            return state.rip;
+        }
+    }
+
+    // Try SSE / XMM / shift / string / system handlers.
+    bool handled = HandleSseInstruction(state, inst, operands);
+    if (!handled) handled = HandleShiftBitInstruction(state, inst, operands);
+    if (!handled) handled = HandleStringRepInstruction(state, inst, operands);
+    if (!handled) handled = HandleSystemLockInstruction(state, inst, operands);
+    if (handled) {
+        state.rip += inst.length;
+        return state.rip;
+    }
+
+    // Try the main handler table.
+    Handler h = LookupHandler(inst.mnemonic);
+    if (h == nullptr) {
+        LOG_ERROR(Core_Cpu, "ExecuteOneInstruction: unimplemented mnemonic {} at rip=0x{:x}",
+                  static_cast<unsigned>(inst.mnemonic), state.rip);
+        state.rip += inst.length; // skip
+        return state.rip;
+    }
+    state.rip = h(state, inst, operands);
+    return state.rip;
+}
+
 } // namespace Core::Cpu
