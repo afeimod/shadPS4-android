@@ -37,6 +37,8 @@
 #include "core/cpu/jit/aarch64_jit_backend.h"
 
 #include <cstring>
+#include <csignal>
+#include <csetjmp>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -89,6 +91,23 @@ struct LinkPatch {
     size_t buffer_offset;  // Offset of the B instruction within the buffer
     u64    target_rip;     // Guest RIP of the target block
 };
+
+// Thread-local crash guard: if the JIT's translated ARM64 code triggers
+// a SIGSEGV, we longjmp back here and fall back to the interpreter.
+static thread_local sigjmp_buf s_jit_jmpbuf;
+static thread_local bool s_jit_crash_guard_active = false;
+static thread_local struct sigaction s_old_sigsegv_handler;
+
+// Temporary SIGSEGV handler for the JIT crash guard.
+static void JitSigsegvHandler(int sig, siginfo_t* info, void* ctx) {
+    if (s_jit_crash_guard_active) {
+        s_jit_crash_guard_active = false;
+        siglongjmp(s_jit_jmpbuf, 1);
+    }
+    // Not in JIT code — restore the old handler and re-raise.
+    signal(SIGSEGV, SIG_DFL);
+    raise(SIGSEGV);
+}
 
 struct Aarch64JitBackend::Impl {
     BlockCache block_cache;
@@ -1625,23 +1644,57 @@ u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
             }
         }
 
-        // Run the translated block via the trampoline.
+        // Run the translated block via the trampoline, guarded by a
+        // crash handler. If the translated ARM64 code triggers a SIGSEGV
+        // (e.g., due to a translation bug), we catch it and fall back
+        // to the interpreter for the rest of execution.
         m_impl->state.rip = rip;
-        const u64 new_rip = m_impl->run_block(&m_impl->state, block->host_code);
+
+        // Install the JIT crash guard.
+        struct sigaction sa, old_sa;
+        sa.sa_sigaction = JitSigsegvHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSEGV, &sa, &old_sa);
+        s_jit_crash_guard_active = true;
+
+        u64 new_rip;
+        if (sigsetjmp(s_jit_jmpbuf, 1) == 0) {
+            // Normal path: run the translated block.
+            new_rip = m_impl->run_block(&m_impl->state, block->host_code);
+        } else {
+            // Crash path: the translated ARM64 code SIGSEGV'd.
+            // Mark this block as bad (invalidate it) and fall back
+            // to the interpreter for the rest of execution.
+            LOG_ERROR(Core_Cpu, "JIT: translated block at rip=0x{:x} crashed "
+                      "(SIGSEGV). Falling back to interpreter.", rip);
+            m_impl->block_cache.Invalidate(rip);
+            new_rip = rip; // re-enter interpreter at the same RIP
+        }
+
+        // Restore the old signal handler.
+        s_jit_crash_guard_active = false;
+        sigaction(SIGSEGV, &old_sa, nullptr);
 
         // Check if the block exited at an unimplemented instruction.
         auto fb = m_impl->fallback_rips.find(rip);
         if (fb != m_impl->fallback_rips.end() && fb->second == new_rip) {
             // The JIT block hit an unimplemented instruction and exited
-            // at new_rip (the RIP of the unimplemented instruction).
-            // Use the interpreter's ExecuteOneInstruction to run just
-            // that one instruction, sharing the JIT's X64CpuState so
-            // GPRs stay synchronized.
+            // at new_rip. Use ExecuteOneInstruction to run just that one
+            // instruction, sharing the JIT's X64CpuState.
             static X64InterpreterBackend s_interpreter;
             m_impl->state.rip = new_rip;
             const u64 cont = s_interpreter.ExecuteOneInstruction(m_impl->state);
             rip = cont;
             continue;
+        }
+
+        // If the block crashed (new_rip == rip after a crash), fall back
+        // to the interpreter for the rest of execution.
+        if (new_rip == rip && !block->valid) {
+            // Block was invalidated due to crash.
+            static X64InterpreterBackend s_interpreter;
+            return s_interpreter.Execute(rip, ctx);
         }
 
         if (new_rip == rip) {
