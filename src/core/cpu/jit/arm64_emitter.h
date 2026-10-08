@@ -110,12 +110,12 @@ public:
 
     // MOV Xd, #imm64 (emits up to 4 MOVZ/MOVK instructions)
     void MovImm64(Arm64Reg dst, u64 imm) {
-        // Check if it's a 16-bit immediate
-        if ((imm & 0xFFFF000000000000ULL) == 0) {
+        // If the value fits in 16 bits, use a single MOVZ.
+        if (imm <= 0xFFFF) {
             Movz16(dst, (u16)imm);
             return;
         }
-        // Full 64-bit: MOVZ + up to 3 MOVK
+        // Full 64-bit (or >16-bit): MOVZ + up to 3 MOVK
         Movz16(dst, (u16)(imm & 0xFFFF), 0);
         if (imm >> 16) Movk16(dst, (u16)((imm >> 16) & 0xFFFF), 16);
         if (imm >> 32) Movk16(dst, (u16)((imm >> 32) & 0xFFFF), 32);

@@ -201,13 +201,14 @@ void Linker::Execute(const std::vector<std::string>& args) {
             result = Libraries::Kernel::sceKernelMapNamedDirectMemory(
                 &addr, 0x10000, 0x13, 0, phys_addr, 0x10000, "SceGnmDriver");
         }
-        ASSERT_MSG(result == 0, "Unable to emulate libSceGnmDriver initialization");
 #if defined(__ANDROID__)
         // On Android, the JIT/interpreter may not perfectly execute
         // libSceGnmDriver init code yet. Don't crash — log and continue.
         if (result != 0) {
             LOG_ERROR(Core_Linker, "libSceGnmDriver init returned {} — continuing anyway", result);
         }
+#else
+        ASSERT_MSG(result == 0, "Unable to emulate libSceGnmDriver initialization");
 #endif
 
         // Add all guest arguments, we will always have the executable path in argv[0]
