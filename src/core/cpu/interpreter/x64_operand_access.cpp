@@ -210,6 +210,13 @@ void SetRegValue(X64CpuState& state, ZydisRegister reg, u64 value, u32 operand_s
 // what the rest of the emulator does — see e.g. src/core/cpu_patches.cpp
 // for the same pattern.
 u64 ReadMemory(u64 guest_addr, u32 size, bool is_signed) {
+    // Guard against null/invalid addresses that would cause SIGSEGV.
+    // Guest memory is at 0x200000000-0x900000000. Addresses outside
+    // this range are invalid and should return 0 instead of crashing.
+    if (guest_addr < 0x100000000ULL || guest_addr >= 0x900000000ULL) {
+        LOG_WARNING(Core_Cpu, "ReadMemory: invalid guest_addr=0x{:x} (size={})", guest_addr, size);
+        return 0;
+    }
     const u8* p = reinterpret_cast<const u8*>(guest_addr);
     u64 value = 0;
     switch (size) {
@@ -232,6 +239,11 @@ u64 ReadMemory(u64 guest_addr, u32 size, bool is_signed) {
 }
 
 void WriteMemory(u64 guest_addr, u64 value, u32 size, bool /*is_signed*/) {
+    // Guard against null/invalid addresses.
+    if (guest_addr < 0x100000000ULL || guest_addr >= 0x900000000ULL) {
+        LOG_WARNING(Core_Cpu, "WriteMemory: invalid guest_addr=0x{:x} (size={})", guest_addr, size);
+        return;
+    }
     u8* p = reinterpret_cast<u8*>(guest_addr);
     switch (size) {
     case 1: { const u8 v  = static_cast<u8>(value);  std::memcpy(p, &v, 1); break; }

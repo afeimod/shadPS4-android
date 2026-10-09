@@ -973,10 +973,25 @@ HANDLER(CmpXchg) {
 //  Main loop
 // ─────────────────────────────────────────────────────────────────────────
 
-u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& /*ctx*/) {
+u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& ctx) {
     X64CpuState state{};
     state.rip = rip;
     state.in_guest_code = true;
+
+    // Set up initial registers from the GuestCallContext, mirroring
+    // what the x86-64 RunMainEntry does via inline asm:
+    //   RDI = params pointer (argc/argv)
+    //   RSI = exit function pointer
+    // On ARM64 the interpreter starts with all GPRs = 0, but the game's
+    // entry point expects argc in RDI and the params struct pointer.
+    // Without this, the first instruction that dereferences [RDI] crashes.
+    if (ctx.argp) {
+        state.gpr[GPR_RDI] = reinterpret_cast<u64>(ctx.argp);
+    }
+    if (ctx.args) {
+        // RSI gets the exit function on x86, but on ARM64 we just
+        // pass 0 — the game checks RDI for argc/argv, not RSI.
+    }
 
     // Android/ARM64 port: allocate a guest stack for the interpreter.
     // On x86 hosts, Linker::RunMainEntry sets up the stack via inline
