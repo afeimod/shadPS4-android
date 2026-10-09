@@ -13,6 +13,7 @@
 #include "common/thread.h"
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
+#include "core/cpu/cpu_backend.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/backends/host_fs.h"
@@ -59,6 +60,19 @@ static PS4_SYSV_ABI void* RunMainEntry [[noreturn]] (EntryParams* params) {
                  : "r"(params->entry_addr), "r"(params), "r"(ProgramExitFunc)
                  : "rax", "rsi", "rdi");
     UNREACHABLE();
+#elif defined(ARCH_ARM64)
+    // On ARM64, dispatch the game's entry point through the CPU backend
+    // (JIT or interpreter). The backend's Execute() runs the guest code
+    // starting at params->entry_addr and returns when the game exits.
+    LOG_INFO(Core_Linker, "ARM64: dispatching game entry 0x{:x} through CPU backend",
+             params->entry_addr);
+    Core::Cpu::GuestCallContext ctx;
+    ctx.args = params->argc;
+    ctx.argp = params;
+    Core::Cpu::GetBackend()->Execute(params->entry_addr, ctx);
+    // The game has exited — call quick_exit like the x86 path would
+    // (it never returns from jmp, but we do since we can't jmp to guest code).
+    std::quick_exit(0);
 #else
     UNREACHABLE_MSG("RunMainEntry unimplemented for current architecture.");
 #endif
