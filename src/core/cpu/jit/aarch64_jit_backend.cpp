@@ -1626,7 +1626,9 @@ u64 Aarch64JitBackend::Execute(u64 rip, const GuestCallContext& ctx) {
         // Validate RIP — must be in guest memory range.
         if (rip < 0x100000000ULL || rip >= 0x900000000ULL) {
             LOG_ERROR(Core_Cpu, "JIT: RIP=0x{:x} outside guest memory, exiting", rip);
-            return rip;
+            // Return 0 to indicate "game exited" (sentinel return address).
+            // Returning the bad RIP would cause the caller to crash.
+            return 0;
         }
 
         const BlockEntry* block = m_impl->block_cache.Lookup(rip);
