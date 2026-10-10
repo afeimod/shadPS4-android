@@ -1043,14 +1043,33 @@ u64 X64InterpreterBackend::Execute(u64 rip, const GuestCallContext& ctx) {
         // code, which would kill the process on Android (the signal
         // handler calls raise(SIGSEGV) to terminate). Instead, log
         // and exit the interpreter loop gracefully.
+        //
+        // x86-64 canonical addresses: if bits 48-63 are all 0 or all 1,
+        // the address is canonical. Non-canonical addresses would #GP on
+        // real hardware. We just check the guest range.
+        //
+        // Special case: 32-bit jumps sign-extend to 64-bit, producing
+        // addresses like 0xFF00000002018dcf. The low 32 bits (0x02018dcf)
+        // might be a valid guest address if sign-extended from 32-bit.
+        // We try to recover by masking to 32 bits + sign-extension.
         if (state.rip < 0x100000000ULL || state.rip >= 0x900000000ULL) {
-            LOG_ERROR(Core_Cpu, "Interpreter: RIP=0x{:x} is outside guest memory range "
-                      "(0x200000000-0x900000000). Likely bad jump/ret from "
-                      "unimplemented instruction. Exiting gracefully.",
-                      state.rip);
-            DumpRecentInterpreterTrace("bad-rip", 32);
-            state.in_guest_code = false;
-            break;
+            // Try 32-bit sign extension recovery
+            u32 rip32 = static_cast<u32>(state.rip);
+            u64 recovered = static_cast<u64>(static_cast<s32>(rip32));
+            if (recovered >= 0x100000000ULL && recovered < 0x900000000ULL) {
+                LOG_WARNING(Core_Cpu, "Interpreter: RIP=0x{:x} outside range, "
+                           "recovered as 32-bit sign-extended 0x{:x}",
+                           state.rip, recovered);
+                state.rip = recovered;
+            } else {
+                LOG_ERROR(Core_Cpu, "Interpreter: RIP=0x{:x} is outside guest memory range "
+                          "(0x200000000-0x900000000). Likely bad jump/ret from "
+                          "unimplemented instruction. Exiting gracefully.",
+                          state.rip);
+                DumpRecentInterpreterTrace("bad-rip", 32);
+                state.in_guest_code = false;
+                break;
+            }
         }
 
         // Optionally consult the JIT's native block provider — if it

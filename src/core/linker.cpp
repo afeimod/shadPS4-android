@@ -70,9 +70,13 @@ static PS4_SYSV_ABI void* RunMainEntry [[noreturn]] (EntryParams* params) {
     ctx.args = params->argc;
     ctx.argp = params;
     Core::Cpu::GetBackend()->Execute(params->entry_addr, ctx);
-    // The game has exited — call quick_exit like the x86 path would
-    // (it never returns from jmp, but we do since we can't jmp to guest code).
-    std::quick_exit(0);
+    // The game has exited (Execute returned). Don't call quick_exit —
+    // that kills the entire process including the main thread's event
+    // loop. Instead, just return from this function. The game thread
+    // will end normally, and the main thread continues running the
+    // SDL event loop (Emulator::Run's while(window->IsOpen()) loop).
+    LOG_INFO(Core_Linker, "ARM64: game entry returned, game thread exiting");
+    return nullptr;
 #else
     UNREACHABLE_MSG("RunMainEntry unimplemented for current architecture.");
 #endif
