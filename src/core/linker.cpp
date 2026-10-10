@@ -167,6 +167,13 @@ void Linker::Execute(const std::vector<std::string>& args) {
     main_thread.Run([this, module, &args, has_libcinternal](std::stop_token) {
         Common::SetCurrentThreadName("Game:Main");
 
+        // On ARM64/Android, the interpreter may trigger C++ exceptions
+        // (e.g. std::length_error from HLE stubs receiving bad pointers,
+        // or std::filesystem errors from bad guest paths). Catch all
+        // exceptions here so the game thread exits cleanly instead of
+        // crashing the process via std::terminate.
+        try {
+
 #ifndef _WIN32 // Clear any existing signal mask for game threads.
         sigset_t emptyset;
         sigemptyset(&emptyset);
@@ -240,6 +247,11 @@ void Linker::Execute(const std::vector<std::string>& args) {
         // Run the game's entry function
         params.entry_addr = module->GetEntryAddress();
         RunMainEntry(&params);
+        } catch (const std::exception& e) {
+            LOG_ERROR(Core_Linker, "Game thread caught C++ exception: {}", e.what());
+        } catch (...) {
+            LOG_ERROR(Core_Linker, "Game thread caught unknown exception");
+        }
     });
 }
 
